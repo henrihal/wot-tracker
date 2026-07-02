@@ -11,3 +11,16 @@ generator client {
 datasource db {
   provider = "sqlite"
 }
+
+/// Cache of Wargaming account/list responses keyed by (search term, realm).
+/// Only `status: "ok"` responses are cached; error responses are always fetched fresh.
+model PlayerSearchCache {
+  search     String
+  realm      String
+  response   String
+  fetchedAt  DateTime @default(now())
+  expiresAt  DateTime
+
+  @@id([search, realm])
+  @@index([expiresAt])
+}
