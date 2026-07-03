@@ -24,3 +24,17 @@ model PlayerSearchCache {
   @@id([search, realm])
   @@index([expiresAt])
 }
+
+/// Cache of Wargaming account/info responses keyed by (account_id, realm).
+/// Permanent: the full public profile (all public statistics.* extras) is
+/// fetched once and stored; forceRefresh re-fetches and overwrites.
+/// private.* extras are not cached (they require an access_token).
+model PlayerInfoCache {
+  accountId Int
+  realm     String
+  response  String
+  fetchedAt DateTime @default(now())
+
+  @@id([accountId, realm])
+  @@index([fetchedAt])
+}
