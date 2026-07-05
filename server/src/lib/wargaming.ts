@@ -2,7 +2,7 @@ import 'dotenv/config'
 import { prisma } from './prisma.js'
 
 const REALMS = ['eu', 'na', 'asia', 'ru'] as const
-type Realm = (typeof REALMS)[number]
+export type Realm = (typeof REALMS)[number]
 
 // Wargaming uses a different host per realm (NA is .com, not .na).
 const API_HOSTS: Record<Realm, string> = {
@@ -22,7 +22,7 @@ const resolveRealm = (): Realm => {
   return raw as Realm
 }
 
-const REALM = resolveRealm()
+export const REALM = resolveRealm()
 
 const rawApplicationId = process.env['WARGAMING_APPLICATION_ID']
 if (!rawApplicationId) {
@@ -36,6 +36,16 @@ const CACHE_TTL_SECONDS = Number.parseInt(
 )
 if (!Number.isFinite(CACHE_TTL_SECONDS) || CACHE_TTL_SECONDS <= 0) {
   throw new Error('WARGAMING_CACHE_TTL_SECONDS must be a positive number')
+}
+
+// TTL for the account/info read cache. Separate from the search cache TTL since
+// player profiles change slowly and can reasonably live longer.
+const INFO_CACHE_TTL_SECONDS = Number.parseInt(
+  process.env['WARGAMING_INFO_CACHE_TTL_SECONDS'] ?? '3600',
+  10
+)
+if (!Number.isFinite(INFO_CACHE_TTL_SECONDS) || INFO_CACHE_TTL_SECONDS <= 0) {
+  throw new Error('WARGAMING_INFO_CACHE_TTL_SECONDS must be a positive number')
 }
 
 const API_URL = `https://${API_HOSTS[REALM]}/wot/account/list/`
@@ -120,7 +130,19 @@ export const searchPlayers = async (
   url.searchParams.set('application_id', APPLICATION_ID)
   url.searchParams.set('search', normalized)
 
-  const res = await fetch(url)
+  let res: Response
+  try {
+    res = await fetch(url)
+  } catch {
+    return {
+      status: 'error',
+      error: {
+        code: 503,
+        message:
+          'Upstream Wargaming request failed: network error contacting the API.',
+      },
+    }
+  }
   if (!res.ok) {
     return {
       status: 'error',
@@ -168,10 +190,11 @@ export interface GetPlayerInfoOptions {
 /**
  * Fetch a Wargaming player profile by account_id via the account/info endpoint,
  * acting as a caching middleman. The full public profile (default fields plus
- * all public statistics.* extras) is fetched once and cached permanently in
- * SQLite keyed by [account_id, realm]; subsequent calls are served from cache.
- * forceRefresh re-fetches and overwrites the cached row. private.* extras are
- * not fetched (they require an access_token we don't have).
+ * all public statistics.* extras) is fetched on a cache miss or expiry and
+ * stored in SQLite keyed by [account_id, realm] until `expiresAt`; subsequent
+ * calls within the TTL are served from cache. forceRefresh re-fetches and
+ * overwrites the cached row (bumping `expiresAt`). private.* extras are not
+ * fetched (they require an access_token we don't have).
  */
 export const getPlayerInfo = async (
   accountId: number,
@@ -194,7 +217,7 @@ export const getPlayerInfo = async (
     const cached = await prisma.playerInfoCache.findUnique({
       where: { accountId_realm: { accountId, realm: REALM } },
     })
-    if (cached) {
+    if (cached && cached.expiresAt > new Date()) {
       return JSON.parse(cached.response) as WargamingInfoResponse
     }
   }
@@ -204,7 +227,19 @@ export const getPlayerInfo = async (
   url.searchParams.set('account_id', String(accountId))
   url.searchParams.set('extra', PUBLIC_EXTRA_FIELDS.join(','))
 
-  const res = await fetch(url)
+  let res: Response
+  try {
+    res = await fetch(url)
+  } catch {
+    return {
+      status: 'error',
+      error: {
+        code: 503,
+        message:
+          'Upstream Wargaming request failed: network error contacting the API.',
+      },
+    }
+  }
   if (!res.ok) {
     return {
       status: 'error',
@@ -219,10 +254,11 @@ export const getPlayerInfo = async (
 
   if (body.status === 'ok') {
     const response = JSON.stringify(body)
+    const expiresAt = new Date(Date.now() + INFO_CACHE_TTL_SECONDS * 1000)
     await prisma.playerInfoCache.upsert({
       where: { accountId_realm: { accountId, realm: REALM } },
-      create: { accountId, realm: REALM, response },
-      update: { response, fetchedAt: new Date() },
+      create: { accountId, realm: REALM, response, expiresAt },
+      update: { response, fetchedAt: new Date(), expiresAt },
     })
   }
 

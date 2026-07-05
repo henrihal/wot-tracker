@@ -7,3 +7,7 @@ node_modules
 *.db-journal
 
 generated/
+
+# tsc build artifacts (outDir is set to ./dist).
+# `npm run dev` uses tsx and needs none of these.
+dist/

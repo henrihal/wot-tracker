@@ -1,5 +1,5 @@
 // This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// learn more at it in the docs: https://pris.ly/d/prisma-schema
 
 // Get a free hosted Postgres database in seconds: `npx create-db`
 
@@ -25,16 +25,47 @@ model PlayerSearchCache {
   @@index([expiresAt])
 }
 
-/// Cache of Wargaming account/info responses keyed by (account_id, realm).
-/// Permanent: the full public profile (all public statistics.* extras) is
-/// fetched once and stored; forceRefresh re-fetches and overwrites.
-/// private.* extras are not cached (they require an access_token).
+/// TTL read cache of Wargaming account/info responses keyed by (account_id, realm).
+/// Only `status: "ok"` responses are cached; error responses are always fetched fresh.
+/// The full public profile (all public statistics.* extras) is fetched on a miss
+/// or expiry and stored until `expiresAt`; forceRefresh re-fetches and overwrites
+/// (bumping `expiresAt`). private.* extras are not cached (they require an access_token).
+/// Historical stats for time-window deltas live in `PlayerStatsSnapshot`, not here.
 model PlayerInfoCache {
   accountId Int
   realm     String
   response  String
   fetchedAt DateTime @default(now())
+  expiresAt  DateTime
 
   @@id([accountId, realm])
-  @@index([fetchedAt])
+  @@index([expiresAt])
+}
+
+/// Per-account snapshot of the numeric `statistics.all.*` and `statistics.random.*`
+/// counters, written by the daily capture job (primary path) and/or on demand via
+/// the stats endpoint (freshness booster, 5-min dedup). Deltas over a window are
+/// computed as `current - nearestPast`. `lastBattleTime` is the WG `last_battle_time`
+/// unix timestamp captured alongside; when it is unchanged vs. the previous snapshot
+/// the row is skipped to avoid storing identical counters.
+model PlayerStatsSnapshot {
+  id             Int      @id @default(autoincrement())
+  accountId      Int
+  realm          String
+  capturedAt     DateTime @default(now())
+  lastBattleTime Int?
+  data           String // JSON of { all, random } core counters
+
+  @@unique([accountId, realm, capturedAt])
+  @@index([accountId, realm, capturedAt])
+}
+
+/// Accounts that should be captured by the daily snapshot job. Auto-populated by
+/// any account_id queried via `/players/info` or the stats endpoint.
+model TrackedAccount {
+  accountId Int
+  realm     String
+  addedAt   DateTime @default(now())
+
+  @@id([accountId, realm])
 }
