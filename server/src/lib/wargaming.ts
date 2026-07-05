@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import { prisma } from './prisma.js'
+import { apiError } from './http.js'
 
 const REALMS = ['eu', 'na', 'asia', 'ru'] as const
 export type Realm = (typeof REALMS)[number]
@@ -106,15 +107,12 @@ export const searchPlayers = async (
   const normalized = search.trim().toLowerCase()
 
   if (normalized.length === 0) {
-    return {
-      status: 'error',
-      error: {
-        code: 402,
-        message: 'SEARCH_NOT_SPECIFIED: Search parameter not specified.',
-        field: 'search',
-        value: '',
-      },
-    }
+    return apiError({
+      code: 402,
+      message: 'SEARCH_NOT_SPECIFIED: Search parameter not specified.',
+      field: 'search',
+      value: '',
+    })
   }
 
   if (!opts.forceRefresh) {
@@ -134,23 +132,17 @@ export const searchPlayers = async (
   try {
     res = await fetch(url)
   } catch {
-    return {
-      status: 'error',
-      error: {
-        code: 503,
-        message:
-          'Upstream Wargaming request failed: network error contacting the API.',
-      },
-    }
+    return apiError({
+      code: 503,
+      message:
+        'Upstream Wargaming request failed: network error contacting the API.',
+    })
   }
   if (!res.ok) {
-    return {
-      status: 'error',
-      error: {
-        code: res.status,
-        message: `Upstream Wargaming request failed with HTTP ${res.status}`,
-      },
-    }
+    return apiError({
+      code: res.status,
+      message: `Upstream Wargaming request failed with HTTP ${res.status}`,
+    })
   }
 
   const body = (await res.json()) as WargamingSearchResponse
@@ -201,16 +193,13 @@ export const getPlayerInfo = async (
   opts: GetPlayerInfoOptions = {}
 ): Promise<WargamingInfoResponse> => {
   if (!Number.isInteger(accountId) || accountId <= 0) {
-    return {
-      status: 'error',
-      error: {
-        code: 402,
-        message:
-          'ACCOUNT_ID_NOT_SPECIFIED: account_id must be a positive integer.',
-        field: 'account_id',
-        value: accountId,
-      },
-    }
+    return apiError({
+      code: 402,
+      message:
+        'ACCOUNT_ID_NOT_SPECIFIED: account_id must be a positive integer.',
+      field: 'account_id',
+      value: accountId,
+    })
   }
 
   if (!opts.forceRefresh) {
@@ -231,23 +220,17 @@ export const getPlayerInfo = async (
   try {
     res = await fetch(url)
   } catch {
-    return {
-      status: 'error',
-      error: {
-        code: 503,
-        message:
-          'Upstream Wargaming request failed: network error contacting the API.',
-      },
-    }
+    return apiError({
+      code: 503,
+      message:
+        'Upstream Wargaming request failed: network error contacting the API.',
+    })
   }
   if (!res.ok) {
-    return {
-      status: 'error',
-      error: {
-        code: res.status,
-        message: `Upstream Wargaming request failed with HTTP ${res.status}`,
-      },
-    }
+    return apiError({
+      code: res.status,
+      message: `Upstream Wargaming request failed with HTTP ${res.status}`,
+    })
   }
 
   const body = (await res.json()) as WargamingInfoResponse
@@ -260,6 +243,21 @@ export const getPlayerInfo = async (
       create: { accountId, realm: REALM, response, expiresAt },
       update: { response, fetchedAt: new Date(), expiresAt },
     })
+
+    // Enroll in the daily-capture work list only when WG actually has the
+    // account. WG returns status:"ok" with data[accountId] === null for a
+    // non-existent account_id; skip those so TrackedAccount stays clean. This
+    // is the single enrollment point for /players/info and the stats endpoints
+    // (the latter reach here via stats.ts getCurrentStats on a snapshot miss).
+    // Not done on the cache-hit path above: a cache row can only exist because
+    // a prior fresh fetch already enrolled the account.
+    if (body.data?.[String(accountId)] != null) {
+      await prisma.trackedAccount.upsert({
+        where: { accountId_realm: { accountId, realm: REALM } },
+        create: { accountId, realm: REALM },
+        update: {},
+      })
+    }
   }
 
   return body

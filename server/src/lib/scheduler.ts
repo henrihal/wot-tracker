@@ -37,7 +37,9 @@ export const runCaptureJob = async (): Promise<CaptureJobSummary> => {
   let errors = 0
   for (const account of tracked) {
     try {
-      const info = await getPlayerInfo(account.accountId, { forceRefresh: true })
+      const info = await getPlayerInfo(account.accountId, {
+        forceRefresh: true,
+      })
       if (info.status !== 'ok') {
         errors += 1
         continue

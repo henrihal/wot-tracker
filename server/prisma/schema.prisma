@@ -61,7 +61,9 @@ model PlayerStatsSnapshot {
 }
 
 /// Accounts that should be captured by the daily snapshot job. Auto-populated by
-/// any account_id queried via `/players/info` or the stats endpoint.
+/// `getPlayerInfo` when Wargaming confirms the account exists (queried via
+/// `/players/info` or the stats endpoint); non-existent account_ids are not
+/// enrolled.
 model TrackedAccount {
   accountId Int
   realm     String

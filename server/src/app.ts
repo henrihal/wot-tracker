@@ -1,82 +1,16 @@
 import 'dotenv/config'
 import express from 'express'
 import { prisma } from './lib/prisma.js'
-import { searchPlayers, getPlayerInfo, REALM } from './lib/wargaming.js'
+import { searchPlayers, getPlayerInfo } from './lib/wargaming.js'
 import { getStatsDelta, getStatsSummary, isValidRange } from './lib/stats.js'
 import { runCaptureJob, startScheduler } from './lib/scheduler.js'
+import { sendApiError, sendResult } from './lib/http.js'
+import { apiErrorHandler } from './lib/middleware.js'
 
 const PORT = process.env['PORT'] || 3001
 const app = express()
 
 app.use(express.json())
-
-app.get('/health', async (_req, res) => {
-  try {
-    await prisma.$queryRaw`SELECT 1`
-    res.json({ status: 'ok', database: 'connected' })
-  } catch (error) {
-    res
-      .status(503)
-      .json({ status: 'error', database: 'unreachable', error: String(error) })
-  }
-})
-
-app.get('/players/search', async (req, res) => {
-  const search = req.query['search']
-  if (typeof search !== 'string') {
-    res.status(400).json({
-      status: 'error',
-      error: {
-        code: 402,
-        message: 'SEARCH_NOT_SPECIFIED: ?search query parameter is required.',
-        field: 'search',
-        value: '',
-      },
-    })
-    return
-  }
-
-  const forceRefresh = req.query['forceRefresh'] === 'true'
-  const result = await searchPlayers(search, { forceRefresh })
-
-  if (result.status === 'ok') {
-    res.json(result)
-  } else {
-    res.status(400).json(result)
-  }
-})
-
-app.get('/players/info', async (req, res) => {
-  const raw = req.query['account_id']
-  const accountId = typeof raw === 'string' ? Number.parseInt(raw, 10) : NaN
-  if (!Number.isInteger(accountId) || accountId <= 0) {
-    res.status(400).json({
-      status: 'error',
-      error: {
-        code: 402,
-        message:
-          'ACCOUNT_ID_NOT_SPECIFIED: ?account_id query parameter must be a positive integer.',
-        field: 'account_id',
-        value: typeof raw === 'string' ? raw : '',
-      },
-    })
-    return
-  }
-
-  const forceRefresh = req.query['forceRefresh'] === 'true'
-  await prisma.trackedAccount.upsert({
-    where: { accountId_realm: { accountId, realm: REALM } },
-    create: { accountId, realm: REALM },
-    update: {},
-  })
-  const result = await getPlayerInfo(accountId, { forceRefresh })
-
-  if (result.status === 'ok') {
-    res.json(result)
-  } else {
-    res.status(400).json(result)
-  }
-})
 
 const parseAccountIdParam = (raw: string | undefined): number | null => {
   const accountId = Number.parseInt(raw ?? '', 10)
@@ -84,34 +18,70 @@ const parseAccountIdParam = (raw: string | undefined): number | null => {
   return accountId
 }
 
-const sendAccountIdError = (
-  res: express.Response,
-  value: string | undefined
-) => {
-  res.status(400).json({
-    status: 'error',
-    error: {
-      code: 402,
-      message:
-        'ACCOUNT_ID_NOT_SPECIFIED: :accountId path parameter must be a positive integer.',
-      field: 'account_id',
-      value: value ?? '',
-    },
+// Shared error response for an invalid :accountId path parameter. Used by both
+// stats routes so the envelope stays identical.
+const sendAccountIdError = (res: express.Response, value: string): void => {
+  sendApiError(res, 400, {
+    code: 402,
+    message:
+      'ACCOUNT_ID_NOT_SPECIFIED: :accountId path parameter must be a positive integer.',
+    field: 'account_id',
+    value,
   })
 }
 
-const trackAccount = async (accountId: number): Promise<void> => {
-  await prisma.trackedAccount.upsert({
-    where: { accountId_realm: { accountId, realm: REALM } },
-    create: { accountId, realm: REALM },
-    update: {},
-  })
-}
+app.get('/health', async (_req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`
+    res.json({ status: 'ok', database: 'connected' })
+  } catch (error) {
+    console.error('Health check failed:', error)
+    sendApiError(res, 503, { code: 503, message: 'Database unreachable' })
+  }
+})
+
+app.get('/players/search', async (req, res) => {
+  const search = req.query['search']
+  if (typeof search !== 'string') {
+    sendApiError(res, 400, {
+      code: 402,
+      message: 'SEARCH_NOT_SPECIFIED: ?search query parameter is required.',
+      field: 'search',
+      value: '',
+    })
+    return
+  }
+
+  const forceRefresh = req.query['forceRefresh'] === 'true'
+  const result = await searchPlayers(search, { forceRefresh })
+  sendResult(res, result)
+})
+
+app.get('/players/info', async (req, res) => {
+  const raw = req.query['account_id']
+  const accountId = parseAccountIdParam(
+    typeof raw === 'string' ? raw : undefined
+  )
+  if (accountId === null) {
+    sendApiError(res, 400, {
+      code: 402,
+      message:
+        'ACCOUNT_ID_NOT_SPECIFIED: ?account_id query parameter must be a positive integer.',
+      field: 'account_id',
+      value: typeof raw === 'string' ? raw : '',
+    })
+    return
+  }
+
+  const forceRefresh = req.query['forceRefresh'] === 'true'
+  const result = await getPlayerInfo(accountId, { forceRefresh })
+  sendResult(res, result)
+})
 
 app.get('/players/:accountId/stats', async (req, res) => {
   const accountId = parseAccountIdParam(req.params['accountId'])
   if (accountId === null) {
-    sendAccountIdError(res, req.params['accountId'])
+    sendAccountIdError(res, req.params['accountId'] ?? '')
     return
   }
 
@@ -119,34 +89,23 @@ app.get('/players/:accountId/stats', async (req, res) => {
   const range =
     typeof rangeRaw === 'string' ? Number.parseInt(rangeRaw, 10) : NaN
   if (!isValidRange(range)) {
-    res.status(400).json({
-      status: 'error',
-      error: {
-        code: 402,
-        message: '?range query parameter must be one of: 7, 14, 30.',
-        field: 'range',
-        value: typeof rangeRaw === 'string' ? rangeRaw : '',
-      },
+    sendApiError(res, 400, {
+      code: 402,
+      message: '?range query parameter must be one of: 7, 14, 30.',
+      field: 'range',
+      value: typeof rangeRaw === 'string' ? rangeRaw : '',
     })
     return
   }
 
-  await trackAccount(accountId)
-
   const result = await getStatsDelta(accountId, range)
-  if (result.status === 'ok') {
-    res.json(result)
-  } else if (result.error.code === 422) {
-    res.status(422).json(result)
-  } else {
-    res.status(400).json(result)
-  }
+  sendResult(res, result)
 })
 
 app.get('/players/:accountId/stats/summary', async (req, res) => {
   const accountId = parseAccountIdParam(req.params['accountId'])
   if (accountId === null) {
-    sendAccountIdError(res, req.params['accountId'])
+    sendAccountIdError(res, req.params['accountId'] ?? '')
     return
   }
 
@@ -168,29 +127,18 @@ app.get('/players/:accountId/stats/summary', async (req, res) => {
   }
 
   if (ranges.length === 0) {
-    res.status(400).json({
-      status: 'error',
-      error: {
-        code: 402,
-        message:
-          '?ranges query parameter must be a comma-separated subset of: 7, 14, 30.',
-        field: 'ranges',
-        value: typeof rangesRaw === 'string' ? rangesRaw : '',
-      },
+    sendApiError(res, 400, {
+      code: 402,
+      message:
+        '?ranges query parameter must be a comma-separated subset of: 7, 14, 30.',
+      field: 'ranges',
+      value: typeof rangesRaw === 'string' ? rangesRaw : '',
     })
     return
   }
 
-  await trackAccount(accountId)
-
   const result = await getStatsSummary(accountId, ranges)
-  if (result.status === 'ok') {
-    res.json(result)
-  } else if (result.error.code === 422) {
-    res.status(422).json(result)
-  } else {
-    res.status(400).json(result)
-  }
+  sendResult(res, result)
 })
 
 app.post('/admin/snapshots/run', async (_req, res) => {
@@ -198,9 +146,15 @@ app.post('/admin/snapshots/run', async (_req, res) => {
     const summary = await runCaptureJob()
     res.json({ status: 'ok', ...summary })
   } catch (error) {
-    res.status(500).json({ status: 'error', error: String(error) })
+    console.error('Capture job failed:', error)
+    sendApiError(res, 500, { code: 500, message: 'Capture job failed' })
   }
 })
+
+// Express 5 routes async rejections and sync throws here. Registered after all
+// routes so thrown errors (Prisma, JSON.parse of a corrupt cache row) become
+// the API's JSON envelope instead of Express's default HTML 500.
+app.use(apiErrorHandler)
 
 app.listen(PORT, () => {
   console.log(`Listening on port ${PORT}`)
