@@ -34,8 +34,9 @@ const DAY_MS = 86_400_000
 export const SNAPSHOT_GC_DAYS = 45
 
 // Skip writing a new snapshot if one was captured for this account within the
-// last 5 minutes, so repeated stats queries don't spam rows.
-const CAPTURE_DEDUP_MS = 5 * 60 * 1000
+// last 5 minutes, so repeated stats queries don't spam rows. Reused by wn8.ts
+// for the same dedup on per-vehicle snapshots.
+export const CAPTURE_DEDUP_MS = 5 * 60 * 1000
 
 // Valid trailing-window ranges (days) exposed by the stats endpoints.
 const VALID_RANGES = [7, 14, 30] as const
