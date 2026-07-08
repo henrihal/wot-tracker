@@ -10,7 +10,8 @@ import type {
 // expDamage/expSpot/expFrag/expDef/expWinRate). Wargaming does NOT expose these;
 // they are derived from active-player statistics by XVM and recalculated daily.
 // We don't need that cadence — refresh on demand via POST /admin/wn8/refresh-expected.
-const MODXVM_WN8_URL = 'https://static.modxvm.com/wn8-data-exp/json/wg/wn8exp.json'
+const MODXVM_WN8_URL =
+  'https://static.modxvm.com/wn8-data-exp/json/wg/wn8exp.json'
 
 interface Wn8ExpectedEntry {
   IDNum: number
@@ -38,7 +39,10 @@ export interface EncyclopediaRefreshSummary {
  * TTL read cache. Returns the count of tanks upserted and pages fetched.
  */
 export const refreshVehicleEncyclopedia = async (): Promise<
-  EncyclopediaRefreshSummary & { status: 'ok' | 'error'; error?: string }
+  EncyclopediaRefreshSummary & {
+    status: 'ok' | 'error'
+    error?: { code: number; message: string }
+  }
 > => {
   const result = await getVehicleEncyclopedia()
   if (result.status !== 'ok') {
@@ -46,7 +50,10 @@ export const refreshVehicleEncyclopedia = async (): Promise<
       status: 'error',
       tanks: 0,
       pages: result.pages,
-      error: result.error?.message ?? 'Upstream Wargaming error',
+      error: {
+        code: 502,
+        message: result.error?.message ?? 'Upstream Wargaming error',
+      },
     }
   }
 
@@ -91,7 +98,10 @@ export interface ExpectedValuesRefreshSummary {
  * Stores the XVM `header.version` date stamp. Returns the count and version.
  */
 export const refreshExpectedValues = async (): Promise<
-  ExpectedValuesRefreshSummary & { status: 'ok' | 'error'; error?: string }
+  ExpectedValuesRefreshSummary & {
+    status: 'ok' | 'error'
+    error?: { code: number; message: string }
+  }
 > => {
   let res: Response
   try {
@@ -101,7 +111,11 @@ export const refreshExpectedValues = async (): Promise<
       status: 'error',
       expected: 0,
       version: '',
-      error: 'Upstream XVM request failed: network error contacting the API.',
+      error: {
+        code: 502,
+        message:
+          'Upstream XVM request failed: network error contacting the API.',
+      },
     }
   }
   if (!res.ok) {
@@ -109,7 +123,10 @@ export const refreshExpectedValues = async (): Promise<
       status: 'error',
       expected: 0,
       version: '',
-      error: `Upstream XVM request failed with HTTP ${res.status}`,
+      error: {
+        code: 502,
+        message: `Upstream XVM request failed with HTTP ${res.status}`,
+      },
     }
   }
 

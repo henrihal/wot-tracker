@@ -15,6 +15,7 @@ import {
 import { runCaptureJob, startScheduler } from './lib/scheduler.js'
 import { sendApiError, sendResult } from './lib/http.js'
 import { apiErrorHandler } from './lib/middleware.js'
+import { adminAuth } from './lib/adminAuth.js'
 
 const PORT = process.env['PORT'] || 3001
 const app = express()
@@ -37,6 +38,41 @@ const sendAccountIdError = (res: express.Response, value: string): void => {
     field: 'account_id',
     value,
   })
+}
+
+// Shared validation messages for the trailing-window ?range / ?ranges params.
+// Both stats and wn8 routes use the same wording, so it lives once here.
+const RANGE_SINGLE_MSG = '?range query parameter must be one of: 7, 14, 30.'
+const RANGE_SET_MSG =
+  '?ranges query parameter must be a comma-separated subset of: 7, 14, 30.'
+
+// Parse the single ?range query param into a valid trailing window (7/14/30)
+// or null. Shared by the stats and wn8 delta routes. Accepts the raw query
+// value (which Express types as string | ParsedQs | array) and narrows to a
+// string inside.
+const parseRange = (raw: unknown): number | null => {
+  const n = typeof raw === 'string' ? Number.parseInt(raw, 10) : NaN
+  return isValidRange(n) ? n : null
+}
+
+// Parse the ?ranges query param into a deduped, order-preserving subset of
+// 7/14/30 (default: all three). Returns null when every entry is invalid so the
+// caller can emit the validation error. Shared by the stats and wn8 summary
+// routes. Accepts the raw query value and narrows to a string inside.
+const parseRanges = (raw: unknown): number[] | null => {
+  const requested =
+    typeof raw === 'string' && raw.length > 0
+      ? raw.split(',')
+      : ['7', '14', '30']
+  const ranges: number[] = []
+  const seen = new Set<number>()
+  for (const part of requested) {
+    const n = Number.parseInt(part, 10)
+    if (!isValidRange(n) || seen.has(n)) continue
+    seen.add(n)
+    ranges.push(n)
+  }
+  return ranges.length > 0 ? ranges : null
 }
 
 app.get('/health', async (_req, res) => {
@@ -66,19 +102,10 @@ app.get('/players/search', async (req, res) => {
   sendResult(res, result)
 })
 
-app.get('/players/info', async (req, res) => {
-  const raw = req.query['account_id']
-  const accountId = parseAccountIdParam(
-    typeof raw === 'string' ? raw : undefined
-  )
+app.get('/players/:accountId', async (req, res) => {
+  const accountId = parseAccountIdParam(req.params['accountId'])
   if (accountId === null) {
-    sendApiError(res, 400, {
-      code: 402,
-      message:
-        'ACCOUNT_ID_NOT_SPECIFIED: ?account_id query parameter must be a positive integer.',
-      field: 'account_id',
-      value: typeof raw === 'string' ? raw : '',
-    })
+    sendAccountIdError(res, req.params['accountId'] ?? '')
     return
   }
 
@@ -95,12 +122,11 @@ app.get('/players/:accountId/stats', async (req, res) => {
   }
 
   const rangeRaw = req.query['range']
-  const range =
-    typeof rangeRaw === 'string' ? Number.parseInt(rangeRaw, 10) : NaN
-  if (!isValidRange(range)) {
+  const range = parseRange(rangeRaw)
+  if (range === null) {
     sendApiError(res, 400, {
       code: 402,
-      message: '?range query parameter must be one of: 7, 14, 30.',
+      message: RANGE_SINGLE_MSG,
       field: 'range',
       value: typeof rangeRaw === 'string' ? rangeRaw : '',
     })
@@ -121,25 +147,11 @@ app.get('/players/:accountId/stats/summary', async (req, res) => {
   // ?ranges=7,14,30 (default: all three). Each value must be a valid range;
   // duplicates are collapsed while preserving first-seen order.
   const rangesRaw = req.query['ranges']
-  const requested =
-    typeof rangesRaw === 'string' && rangesRaw.length > 0
-      ? rangesRaw.split(',')
-      : ['7', '14', '30']
-
-  const ranges: number[] = []
-  const seen = new Set<number>()
-  for (const part of requested) {
-    const n = Number.parseInt(part, 10)
-    if (!isValidRange(n) || seen.has(n)) continue
-    seen.add(n)
-    ranges.push(n)
-  }
-
-  if (ranges.length === 0) {
+  const ranges = parseRanges(rangesRaw)
+  if (ranges === null) {
     sendApiError(res, 400, {
       code: 402,
-      message:
-        '?ranges query parameter must be a comma-separated subset of: 7, 14, 30.',
+      message: RANGE_SET_MSG,
       field: 'ranges',
       value: typeof rangesRaw === 'string' ? rangesRaw : '',
     })
@@ -177,12 +189,11 @@ app.get('/players/:accountId/wn8', async (req, res) => {
     return
   }
 
-  const range =
-    typeof rangeRaw === 'string' ? Number.parseInt(rangeRaw, 10) : NaN
-  if (!isValidRange(range)) {
+  const range = parseRange(rangeRaw)
+  if (range === null) {
     sendApiError(res, 400, {
       code: 402,
-      message: '?range query parameter must be one of: 7, 14, 30.',
+      message: RANGE_SINGLE_MSG,
       field: 'range',
       value: typeof rangeRaw === 'string' ? rangeRaw : '',
     })
@@ -203,25 +214,11 @@ app.get('/players/:accountId/wn8/summary', async (req, res) => {
   // ?ranges=7,14,30 (default: all three). Each value must be a valid range;
   // duplicates are collapsed while preserving first-seen order.
   const rangesRaw = req.query['ranges']
-  const requested =
-    typeof rangesRaw === 'string' && rangesRaw.length > 0
-      ? rangesRaw.split(',')
-      : ['7', '14', '30']
-
-  const ranges: number[] = []
-  const seen = new Set<number>()
-  for (const part of requested) {
-    const n = Number.parseInt(part, 10)
-    if (!isValidRange(n) || seen.has(n)) continue
-    seen.add(n)
-    ranges.push(n)
-  }
-
-  if (ranges.length === 0) {
+  const ranges = parseRanges(rangesRaw)
+  if (ranges === null) {
     sendApiError(res, 400, {
       code: 402,
-      message:
-        '?ranges query parameter must be a comma-separated subset of: 7, 14, 30.',
+      message: RANGE_SET_MSG,
       field: 'ranges',
       value: typeof rangesRaw === 'string' ? rangesRaw : '',
     })
@@ -232,55 +229,40 @@ app.get('/players/:accountId/wn8/summary', async (req, res) => {
   sendResult(res, result)
 })
 
+// Admin endpoints are gated behind an X-Admin-Token header checked against
+// ADMIN_TOKEN. Fail-closed: if ADMIN_TOKEN is unset, every admin route returns
+// 503. See lib/adminAuth.ts.
+app.use('/admin', adminAuth)
+
 app.post('/admin/snapshots/run', async (_req, res) => {
-  try {
-    const summary = await runCaptureJob()
-    res.json({ status: 'ok', ...summary })
-  } catch (error) {
-    console.error('Capture job failed:', error)
-    sendApiError(res, 500, { code: 500, message: 'Capture job failed' })
-  }
+  // runCaptureJob throws on hard failure (Prisma/DB) — those propagate to
+  // apiErrorHandler as a 500 JSON envelope. The ok summary has no `status`
+  // field, so the envelope is built here.
+  const summary = await runCaptureJob()
+  sendResult(res, { status: 'ok', ...summary })
 })
 
 app.post('/admin/vehicles/refresh', async (_req, res) => {
-  try {
-    const summary = await refreshVehicleEncyclopedia()
-    if (summary.status === 'ok') {
-      res.json(summary)
-    } else {
-      sendApiError(res, 502, {
-        code: 502,
-        message: summary.error ?? 'Vehicle encyclopedia refresh failed',
-      })
-    }
-  } catch (error) {
-    console.error('Vehicle encyclopedia refresh failed:', error)
-    sendApiError(res, 500, {
-      code: 500,
-      message: 'Vehicle encyclopedia refresh failed',
-    })
-  }
+  // refreshVehicleEncyclopedia returns a TaggedApiResult: { status:'ok', tanks,
+  // pages } or { status:'error', error:{code,message} }. sendResult forwards the
+  // ok branch and promotes the error code (502) to the HTTP status. Throws
+  // (unexpected Prisma errors) fall through to apiErrorHandler.
+  const result = await refreshVehicleEncyclopedia()
+  sendResult(res, result)
 })
 
 app.post('/admin/wn8/refresh-expected', async (_req, res) => {
-  try {
-    const summary = await refreshExpectedValues()
-    if (summary.status === 'ok') {
-      res.json(summary)
-    } else {
-      sendApiError(res, 502, {
-        code: 502,
-        message: summary.error ?? 'WN8 expected-values refresh failed',
-      })
-    }
-  } catch (error) {
-    console.error('WN8 expected-values refresh failed:', error)
-    sendApiError(res, 500, {
-      code: 500,
-      message: 'WN8 expected-values refresh failed',
-    })
-  }
+  const result = await refreshExpectedValues()
+  sendResult(res, result)
 })
+
+// Unmatched routes fall through to this JSON 404 envelope instead of Express's
+// default HTML 404, keeping the response shape uniform for clients. Registered
+// before the error handler (which is matched by arity + position) so a normal
+// 2-arg middleware handles the not-found case.
+app.use((_req, res) =>
+  sendApiError(res, 404, { code: 404, message: 'Not found' })
+)
 
 // Express 5 routes async rejections and sync throws here. Registered after all
 // routes so thrown errors (Prisma, JSON.parse of a corrupt cache row) become
