@@ -9,8 +9,8 @@ import type {
 } from '../../generated/prisma/client.js'
 import { CAPTURE_DEDUP_MS } from './stats.js'
 
-// WN8 input counters snapshotted from each tank's `statistics.all.*` group.
-// Lean on purpose: only what the WN8 formula consumes (the `all` group is what
+// WN8 input counters snapshotted from each tank's `statistics.random.*` group.
+// Lean on purpose: only what the WN8 formula consumes (the `random` group is what
 // WN8 is defined against). `dropped_capture_points` is the defense stat.
 const VEHICLE_FIELDS = [
   'battles',
@@ -217,10 +217,37 @@ export const computeVehicleDelta = (
 const safeDiv = (n: number, d: number): number => (d > 0 ? n / d : 0)
 
 /**
+ * The shared WN8 formula tail: apply the canonical clamp/cap then the weighted
+ * sum to the five normalized ratios (rDAMAGE, rSPOT, rFRAG, rDEF, rWIN). Both the
+ * per-tank path and the account-wide aggregate path funnel through here so the
+ * nonlinear step cannot drift between them. Returns the unrounded WN8.
+ */
+const wn8FromRatios = (
+  rDAMAGE: number,
+  rSPOT: number,
+  rFRAG: number,
+  rDEF: number,
+  rWIN: number
+): number => {
+  const rWINc = Math.max(0, (rWIN - 0.71) / 0.29)
+  const rDAMAGEc = Math.max(0, (rDAMAGE - 0.22) / 0.78)
+  const rFRAGc = Math.max(0, Math.min(rDAMAGEc + 0.2, (rFRAG - 0.12) / 0.88))
+  const rSPOTc = Math.max(0, Math.min(rDAMAGEc + 0.1, (rSPOT - 0.38) / 0.62))
+  const rDEFc = Math.max(0, Math.min(rDAMAGEc + 0.1, (rDEF - 0.1) / 0.9))
+
+  return (
+    980 * rDAMAGEc +
+    210 * rDAMAGEc * rFRAGc +
+    155 * rFRAGc * rSPOTc +
+    75 * rDEFc * rFRAGc +
+    145 * Math.min(1.8, rWINc)
+  )
+}
+
+/**
  * Compute a single tank's WN8 from its counters and expected values, using the
  * canonical WN8 formula (ratios → clamp/cap → weighted sum). Returns 0 when
- * the tank has no battles or when expected values are missing. See the plan
- * file for the exact coefficient derivation.
+ * the tank has no battles or when expected values are missing.
  */
 export const computeTankWN8 = (
   counters: VehicleCounters,
@@ -235,45 +262,50 @@ export const computeTankWN8 = (
   const rDEF = safeDiv(counters.dropped_capture_points, battles) / exp.expDef
   const rWIN = (safeDiv(counters.wins, battles) * 100) / exp.expWinRate
 
-  const rWINc = Math.max(0, (rWIN - 0.71) / 0.29)
-  const rDAMAGEc = Math.max(0, (rDAMAGE - 0.22) / 0.78)
-  const rFRAGc = Math.max(0, Math.min(rDAMAGEc + 0.2, (rFRAG - 0.12) / 0.88))
-  const rSPOTc = Math.max(0, Math.min(rDAMAGEc + 0.1, (rSPOT - 0.38) / 0.62))
-  const rDEFc = Math.max(0, Math.min(rDAMAGEc + 0.1, (rDEF - 0.10) / 0.90))
-  
-  return Math.round(
-    980 * rDAMAGEc +
-      210 * rDAMAGEc * rFRAGc +
-      155 * rFRAGc * rSPOTc +
-      75 * rDEFc * rFRAGc +
-      145 * Math.min(1.8, rWINc)
-  )
+  return Math.round(wn8FromRatios(rDAMAGE, rSPOT, rFRAG, rDEF, rWIN))
 }
 
-export interface TankWN8 {
+export interface TankWN8 extends VehicleCounters {
   tankId: number
   name: string
   tier: number
   type: string
-  battles: number
   wn8: number
 }
 
 /**
- * Battle-weighted account WN8 from a per-tank counter map. Tanks missing from
- * `expectedById` (or with no expected values) are excluded entirely — they
- * contribute neither to the numerator nor to the battle-weighted denominator.
- * `vehicleById` enriches each entry with name/tier/type. Returns the aggregate
- * WN8, total battles counted, and a per-tank breakdown (tanks with >0 counted
- * battles and a known expected row).
+ * Account-wide WN8 from a per-tank counter map. WN8 is defined as a single
+ * formula applied once to account-wide aggregates — NOT a battle-weighted mean
+ * of per-tank WN8 scores (the clamp/cap nonlinearity does not compose). So we
+ * sum all raw counters and all battle-weighted expected values across tanks,
+ * then apply the formula once to those aggregates via `wn8FromRatios`.
+ *
+ * Tanks missing from `expectedById` (or with no expected values) are excluded
+ * entirely — they contribute to neither the numerator nor the battle-weighted
+ * expected denominator. `vehicleById` enriches the breakdown. Returns the
+ * aggregate WN8, total battles counted, and a per-tank breakdown (each entry's
+ * `wn8` is that tank's own WN8 via `computeTankWN8`, for display only).
  */
 export const computeAccountWN8 = (
   perTank: VehicleStats,
   expectedById: Map<number, VehicleExpectedValue>,
   vehicleById: Map<number, Vehicle>
 ): { wn8: number; battles: number; perTank: TankWN8[] } => {
-  let weighted = 0
-  let battles = 0
+  // Account-wide aggregates: raw counters and battle-weighted expected values
+  // accumulated across tanks, so the WN8 formula can be applied once to them.
+  const total = {
+    damage: 0,
+    spot: 0,
+    frag: 0,
+    def: 0,
+    win: 0,
+    battles: 0,
+    expDmg: 0,
+    expSpot: 0,
+    expFrag: 0,
+    expDef: 0,
+    expWin: 0,
+  }
   const breakdown: TankWN8[] = []
 
   for (const [id, counters] of Object.entries(perTank)) {
@@ -281,26 +313,47 @@ export const computeAccountWN8 = (
     if (!Number.isFinite(tankId)) continue
     const exp = expectedById.get(tankId)
     if (!exp) continue
+    const b = counters.battles
+    if (b <= 0) continue
+
+    total.damage += counters.damage_dealt
+    total.spot += counters.spotted
+    total.frag += counters.frags
+    total.def += counters.dropped_capture_points
+    total.win += counters.wins
+    total.battles += b
+    total.expDmg += exp.expDamage * b
+    total.expSpot += exp.expSpot * b
+    total.expFrag += exp.expFrag * b
+    total.expDef += exp.expDef * b
+    total.expWin += exp.expWinRate * b
+
     const tankWN8 = computeTankWN8(counters, exp)
-    weighted += tankWN8 * counters.battles
-    battles += counters.battles
     const vehicle = vehicleById.get(tankId)
     breakdown.push({
       tankId,
+      ...counters,
       name: vehicle?.name ?? '',
       tier: vehicle?.tier ?? 0,
       type: vehicle?.type ?? '',
-      battles: counters.battles,
       wn8: tankWN8,
     })
   }
 
   breakdown.sort((a, b) => b.battles - a.battles)
-  return {
-    wn8: battles > 0 ? Math.round((weighted / battles)) : 0,
-    battles,
-    perTank: breakdown,
-  }
+  const wn8 =
+    total.battles > 0
+      ? Math.round(
+          wn8FromRatios(
+            safeDiv(total.damage, total.expDmg),
+            safeDiv(total.spot, total.expSpot),
+            safeDiv(total.frag, total.expFrag),
+            safeDiv(total.def, total.expDef),
+            (total.win * 100) / total.expWin
+          )
+        )
+      : 0
+  return { wn8, battles: total.battles, perTank: breakdown }
 }
 
 const resolveInputs = async (
