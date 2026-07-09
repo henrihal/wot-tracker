@@ -1,16 +1,10 @@
 import type { ErrorRequestHandler } from 'express'
 import { apiError } from './http.js'
 
-// Express 5 error-handling middleware. Express 5 forwards async rejections
-// and synchronous throws from route handlers here, so this is what turns a
-// Prisma error or a JSON.parse of a corrupt cache row into the API's JSON
-// envelope instead of Express's default HTML 500. Must be registered AFTER
-// all routes (error middleware is matched by arity + position).
-//
-// Honors `err.status` / `err.statusCode` when Express set them (e.g.
-// express.json() raises status:400 on malformed JSON, http-errors sets
-// statusCode) so client errors aren't mislabeled as 500 and don't trip 5xx
-// alerting. Anything without a valid 4xx/5xx status falls back to 500.
+// Express 5 error handler: turns async rejections / sync throws (Prisma, a
+// corrupt cache JSON.parse) into the API's JSON envelope instead of HTML 500.
+// Honors err.status / err.statusCode so client errors aren't mislabeled 5xx;
+// else 500. Register after all routes (matched by arity + position).
 export const apiErrorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   console.error('Unhandled error:', err)
   const status = readErrorStatus(err)

@@ -3,9 +3,8 @@ import { prisma } from './prisma.js'
 import { getPlayerInfo, REALM } from './wargaming.js'
 import type { WargamingInfoResponse } from './wargaming.js'
 
-// Core numeric counters snapshotted from `statistics.all.*` and
-// `statistics.random.*`. A fixed allowlist (not the whole response) keeps
-// deltas clean and the snapshot table small.
+// Numeric counters snapshotted from statistics.all/random.* (an allowlist keeps
+// deltas clean and the table small).
 const CORE_FIELDS = [
   'battles',
   'wins',
@@ -27,18 +26,16 @@ type SnapshotGroup = (typeof SNAPSHOT_GROUPS)[number]
 
 export type SnapshotData = Record<SnapshotGroup, Record<string, number>>
 
-/// Trailing-window retention. Snapshots older than this are GC'd by the daily
-/// capture job (not on the read path). Kept well above the max delta window
-/// (30 days) so the sliding anchor always has a usable past point.
+/// Snapshots older than this are GC'd by the daily capture job (not on the read
+/// path). Kept above the max 30-day window so the sliding anchor has a past point.
 const DAY_MS = 86_400_000
 export const SNAPSHOT_GC_DAYS = 45
 
-// Skip writing a new snapshot if one was captured for this account within the
-// last 5 minutes, so repeated stats queries don't spam rows. Reused by wn8.ts
-// for the same dedup on per-vehicle snapshots.
+// Skip a new snapshot if one was captured within the last 5 min, so repeated
+// queries don't spam rows. Reused by wn8.ts for per-vehicle snapshots.
 export const CAPTURE_DEDUP_MS = 5 * 60 * 1000
 
-// Valid trailing-window ranges (days) exposed by the stats endpoints.
+// Trailing-window ranges (days) exposed by the stats endpoints.
 const VALID_RANGES = [7, 14, 30] as const
 export type StatsRange = (typeof VALID_RANGES)[number]
 
@@ -63,11 +60,7 @@ const pickNumeric = (
   return out
 }
 
-/**
- * Extract the allowlist of numeric counters from a Wargaming account/info
- * response. Returns `null` if the account isn't present in the response payload
- * (e.g. unknown account_id, or WG returned `null` for it).
- */
+/** Extract the allowlist counters from account/info. null if the account isn't present. */
 export const extractStats = (
   info: WargamingInfoResponse,
   accountId: number
@@ -84,11 +77,7 @@ export const extractStats = (
   }
 }
 
-/**
- * Extract the WG `last_battle_time` unix timestamp for an account, used to
- * detect whether the player has played since the previous snapshot. Returns
- * `null` if the field is missing or non-numeric.
- */
+/** Extract WG last_battle_time for inactivity detection. null if missing/non-numeric. */
 export const extractLastBattleTime = (
   info: WargamingInfoResponse,
   accountId: number
@@ -101,12 +90,7 @@ export const extractLastBattleTime = (
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
-/**
- * Subtract each allowlist field field-by-field (past from current) for both
- * `all` and `random`. Negative deltas are clamped to 0 — these are monotonic
- * cumulative counters, so a negative implies a WG reset or a stale/buggy
- * snapshot rather than real play.
- */
+/** Per-field current − past for both groups; negatives clamped to 0 (monotonic counters). */
 export const computeDelta = (
   past: SnapshotData,
   current: SnapshotData
@@ -125,9 +109,8 @@ export const computeDelta = (
 }
 
 /**
- * Render-ready per-group metrics derived from a counter delta. Rates are
- * expressed as percentages (0–100); per-battle averages are raw ratios. All
- * values default to 0 when `battles` is 0 to avoid NaN/Infinity.
+ * Render-ready per-group metrics from a counter delta. Rates as percentages
+ * (0–100), per-battle values raw; 0 when battles is 0 to avoid NaN/Infinity.
  */
 export interface DerivedMetrics {
   battles: number
@@ -171,18 +154,11 @@ export const deriveMetrics = (delta: SnapshotData): MetricsByGroup => ({
 })
 
 /**
- * Write a snapshot row for the account unless one was captured within the last
- * `CAPTURE_DEDUP_MS`. When `skipIfInactive` is true (the default), also no-ops
- * if the player's `last_battle_time` is unchanged since the most recent
- * snapshot (i.e. they haven't played) — this keeps the daily capture job from
- * stacking identical rows. The read path passes `skipIfInactive: false` so a
- * recent row always lands within `CAPTURE_DEDUP_MS` and the next stats query is
- * served from the snapshot instead of hitting Wargaming, preserving the
- * documented 5-min-per-account throttle for inactive as well as active
- * players. No-ops if the account has no parseable statistics in the response. A
- * unique-constraint collision (two concurrent captures landing in the same
- * second) is ignored — the recent row already serves the purpose. Returns true
- * when a new row was written.
+ * Write a snapshot unless one was captured within CAPTURE_DEDUP_MS. With
+ * skipIfInactive (default) also no-op if last_battle_time is unchanged since
+ * the last snapshot (keeps the daily job from stacking identical rows); the
+ * read path passes false so a fresh row always lands. P2002 (same-second race)
+ * is ignored. Returns true if a row was written.
  */
 export const captureSnapshotIfStale = async (
   accountId: number,
@@ -229,8 +205,8 @@ export const captureSnapshotIfStale = async (
       },
     })
   } catch (error) {
-    // P2002 = unique-constraint violation on [accountId, realm, capturedAt]:
-    // a concurrent capture won the race within the same second. Ignore it.
+    // P2002: a concurrent capture won the same-second race; the recent row
+    // already serves the purpose.
     if (
       typeof error === 'object' &&
       error !== null &&
@@ -245,11 +221,8 @@ export const captureSnapshotIfStale = async (
 }
 
 /**
- * Resolve the "current" counter set for an account. A snapshot captured within
- * the last `CAPTURE_DEDUP_MS` (5 min) is reused so repeated stats queries don't
- * hit Wargaming; otherwise the profile is force-refreshed, a fresh snapshot is
- * recorded (skipped if the player hasn't played since the last one), and the
- * freshly fetched counters are used directly.
+ * Resolve the current counters: reuse a snapshot within CAPTURE_DEDUP_MS, else
+ * force-refresh + capture + use the freshly fetched counters.
  */
 const getCurrentStats = async (
   accountId: number
@@ -289,17 +262,9 @@ const getCurrentStats = async (
 }
 
 /**
- * Find a past snapshot to diff against and compute the delta + derived metrics
- * over the supplied current counters. Prefers the nearest snapshot at least
- * `days` old so the window matches the request; if none is old enough (the
- * account has been tracked for less than `days`), falls back to the OLDEST
- * available past snapshot so the client still gets a best-available diff
- * rather than a 422 — `from` records the anchor actually used, so a client can
- * tell when the real window is shorter than `range`. The fallback excludes
- * rows within `CAPTURE_DEDUP_MS` of now so we never diff against the
- * just-captured "current" row. Returns `INSUFFICIENT_HISTORY` (422) only when
- * no past snapshot exists at all. GC is intentionally not performed here — it
- * runs in the daily capture job only.
+ * Diff against a past snapshot: nearest at >= days ago, else the oldest past
+ * one (best-available, recorded in `from` so the client sees the real window).
+ * INSUFFICIENT_HISTORY (422) only when no past snapshot exists. No GC here.
  */
 const computeRangeResult = async (
   accountId: number,
@@ -353,15 +318,9 @@ export type StatsDeltaResult =
   | { status: 'error'; error: { code: number; message: string } }
 
 /**
- * Compute per-field stat deltas and derived metrics over a trailing window of
- * `days` days. "Current" stats come from a snapshot captured within the last
- * `CAPTURE_DEDUP_MS` (5 min) if one exists; otherwise the profile is
- * force-refreshed and a fresh snapshot is recorded. The nearest snapshot at
- * >= `days` ago is used as the past anchor; if none is that old, the oldest
- * available past snapshot is used as a best-available anchor (see
- * `computeRangeResult`). Returns `INSUFFICIENT_HISTORY` (422) only when no
- * past snapshot exists at all — otherwise the diff is always returned, with
- * `from` showing the anchor actually used.
+ * Trailing-window stat delta over `days` days. Current via getCurrentStats;
+ * past anchor via computeRangeResult. INSUFFICIENT_HISTORY only when no past
+ * snapshot exists — otherwise `from` shows the anchor actually used.
  */
 export const getStatsDelta = async (
   accountId: number,
@@ -381,13 +340,9 @@ export type StatsSummaryResult =
   StatsSummaryOk | { status: 'error'; error: { code: number; message: string } }
 
 /**
- * Compute deltas + derived metrics for multiple trailing windows in one call.
- * "Current" is fetched once and reused across all ranges; each range resolves
- * its own past anchor independently (preferring a snapshot at least `days` old,
- * else the oldest available past one). An `INSUFFICIENT_HISTORY` entry appears
- * in `ranges` only when no past snapshot exists at all for that range; the
- * whole request never fails on a single range, so a frontend can render
- * partial tables.
+ * Deltas for multiple windows in one call: current is fetched once, each range
+ * resolves its own anchor. A range with no history yields an
+ * INSUFFICIENT_HISTORY entry, never a whole-request failure.
  */
 export const getStatsSummary = async (
   accountId: number,

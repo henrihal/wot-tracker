@@ -6,10 +6,8 @@ import type {
   VehicleExpectedValue,
 } from '../../generated/prisma/client.js'
 
-// XVM publishes the canonical WN8 expected-values dataset (per-tank
-// expDamage/expSpot/expFrag/expDef/expWinRate). Wargaming does NOT expose these;
-// they are derived from active-player statistics by XVM and recalculated daily.
-// We don't need that cadence — refresh on demand via POST /admin/wn8/refresh-expected.
+// XVM publishes the canonical WN8 expected values (WG doesn't expose them).
+// Refresh on demand via POST /admin/wn8/refresh-expected.
 const MODXVM_WN8_URL =
   'https://static.modxvm.com/wn8-data-exp/json/wg/wn8exp.json'
 
@@ -33,10 +31,9 @@ export interface EncyclopediaRefreshSummary {
 }
 
 /**
- * Fetch the full vehicle encyclopedia from Wargaming (paginated) and upsert
- * every tank into the `Vehicle` table keyed by `tankId`. Encyclopedia changes
- * rarely (new tanks), so this is an explicit admin-triggered refresh, not a
- * TTL read cache. Returns the count of tanks upserted and pages fetched.
+ * Fetch the full WG vehicle encyclopedia (paginated) and upsert every tank into
+ * `Vehicle` keyed by tankId. Admin-triggered (not a TTL cache) since it changes
+ * rarely. Returns tanks upserted and pages fetched.
  */
 export const refreshVehicleEncyclopedia = async (): Promise<
   EncyclopediaRefreshSummary & {
@@ -93,9 +90,9 @@ export interface ExpectedValuesRefreshSummary {
 }
 
 /**
- * Fetch the XVM WN8 expected-values JSON and upsert every tank's expected
- * values into `VehicleExpectedValue` keyed by `tankId` (the JSON `IDNum`).
- * Stores the XVM `header.version` date stamp. Returns the count and version.
+ * Fetch the XVM expected-values JSON and upsert every tank into
+ * `VehicleExpectedValue` keyed by tankId (the JSON IDNum). Stores the XVM
+ * header.version. Returns the count and version.
  */
 export const refreshExpectedValues = async (): Promise<
   ExpectedValuesRefreshSummary & {
@@ -161,10 +158,7 @@ export const refreshExpectedValues = async (): Promise<
   return { status: 'ok', expected: entries.length, version }
 }
 
-/**
- * Batch-load `Vehicle` rows for the given tank_ids, returning a `Map` keyed by
- * `tankId`. Used to enrich WN8 results with name/tier/type.
- */
+/** Batch-load `Vehicle` rows into a Map keyed by tankId (enriches WN8 results). */
 export const getVehiclesByIds = async (
   tankIds: number[]
 ): Promise<Map<number, Vehicle>> => {
@@ -178,9 +172,9 @@ export const getVehiclesByIds = async (
 }
 
 /**
- * Batch-load `VehicleExpectedValue` rows for the given tank_ids, returning a
- * `Map` keyed by `tankId`. Tanks missing from this map are excluded from WN8
- * (their per-tank WN8 can't be computed without expected values).
+ * Batch-load `VehicleExpectedValue` rows into a Map keyed by tankId. Tanks
+ * missing from this map are excluded from WN8 (no expected values to compute
+ * against).
  */
 export const getExpectedValuesByIds = async (
   tankIds: number[]
