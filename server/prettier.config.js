@@ -1,6 +1,6 @@
-export default config = {
-  trailingComma: "es5",
-  tabWidth: 4,
+export default {
+  trailingComma: 'es5',
+  tabWidth: 2,
   semi: false,
   singleQuote: true,
-};
+}

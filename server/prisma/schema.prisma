@@ -1,0 +1,145 @@
+// This is your Prisma schema file,
+// learn more at it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+/// Cache of Wargaming account/list responses keyed by (search term, realm).
+/// Only `status: "ok"` responses are cached; error responses are always fetched fresh.
+model PlayerSearchCache {
+  search     String
+  realm      String
+  response   String
+  fetchedAt  DateTime @default(now())
+  expiresAt  DateTime
+
+  @@id([search, realm])
+  @@index([expiresAt])
+}
+
+/// TTL read cache of Wargaming account/info responses keyed by (account_id, realm).
+/// Only `status: "ok"` responses are cached; error responses are always fetched fresh.
+/// The full public profile (all public statistics.* extras) is fetched on a miss
+/// or expiry and stored until `expiresAt`; forceRefresh re-fetches and overwrites
+/// (bumping `expiresAt`). private.* extras are not cached (they require an access_token).
+/// Historical stats for time-window deltas live in `PlayerStatsSnapshot`, not here.
+model PlayerInfoCache {
+  accountId Int
+  realm     String
+  response  String
+  fetchedAt DateTime @default(now())
+  expiresAt  DateTime
+
+  @@id([accountId, realm])
+  @@index([expiresAt])
+}
+
+/// Per-account snapshot of the numeric `statistics.all.*` and `statistics.random.*`
+/// counters, written by the daily capture job (primary path) and/or on demand via
+/// the stats endpoint (freshness booster, 5-min dedup). Deltas over a window are
+/// computed as `current - nearestPast`. `lastBattleTime` is the WG `last_battle_time`
+/// unix timestamp captured alongside; when it is unchanged vs. the previous snapshot
+/// the row is skipped to avoid storing identical counters.
+model PlayerStatsSnapshot {
+  id             Int      @id @default(autoincrement())
+  accountId      Int
+  realm          String
+  capturedAt     DateTime @default(now())
+  lastBattleTime Int?
+  data           String // JSON of { all, random } core counters
+
+  @@unique([accountId, realm, capturedAt])
+  @@index([accountId, realm, capturedAt])
+}
+
+/// Accounts that should be captured by the daily snapshot job. Auto-populated by
+/// `getPlayerInfo` when Wargaming confirms the account exists (queried via
+/// `/players/info` or the stats endpoint); non-existent account_ids are not
+/// enrolled. `getPlayerVehicles` is a second enrollment point: it upserts the
+/// account when WG returns a non-empty tanks/stats array (the player has played
+/// at least one tank → the account exists), so `/players/:id/vehicles` and
+/// `/wn8` build history without a prior `/players/info`.
+model TrackedAccount {
+  accountId Int
+  realm     String
+  addedAt   DateTime @default(now())
+
+  @@id([accountId, realm])
+}
+
+/// Vehicle encyclopedia reference, fetched from `wot/encyclopedia/vehicles/`
+/// (paginated) and upserted normalized by `refreshVehicleEncyclopedia`. WN8 needs
+/// `tier`/`type`; the routes use the rest for display. Refreshed on demand via
+/// `POST /admin/vehicles/refresh` — encyclopedia changes rarely (new tanks).
+model Vehicle {
+  tankId    Int      @id
+  name      String
+  shortName String
+  nation    String
+  tier      Int
+  type      String
+  isPremium Boolean
+  tag       String?
+  fetchedAt DateTime @default(now())
+}
+
+/// Per-tank WN8 expected values from the XVM dataset
+/// (https://static.modxvm.com/wn8-data-exp/json/wn8exp.json), keyed by `tankId`
+/// (the JSON `IDNum`). `version` is the XVM `header.version` date stamp.
+/// Refreshed on demand via `POST /admin/wn8/refresh-expected`; XVM recalculates
+/// daily but we don't need that cadence.
+model VehicleExpectedValue {
+  tankId     Int      @id
+  expFrag    Float
+  expDamage  Float
+  expSpot    Float
+  expDef     Float
+  expWinRate Float
+  version    String
+  fetchedAt  DateTime @default(now())
+}
+
+/// TTL read cache of Wargaming `tanks/stats` responses keyed by (account_id,
+/// realm). Only `status: "ok"` responses are cached; error responses are always
+/// fetched fresh. The full public per-tank stats (default `all` group + the
+/// `random` extra) are fetched on a miss or expiry and stored until `expiresAt`;
+/// forceRefresh re-fetches and overwrites. The `in_garage` field is not fetched
+/// (it requires an access_token). Historical per-tank counters for trailing-
+/// window WN8 deltas live in `PlayerVehicleSnapshot`, not here.
+model PlayerVehicleStatsCache {
+  accountId Int
+  realm     String
+  response  String
+  fetchedAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@id([accountId, realm])
+  @@index([expiresAt])
+}
+
+/// Per-account snapshot of ALL tanks' WN8 input counters, written by the daily
+/// capture job and/or on demand via the WN8 endpoint (freshness booster, 5-min
+/// dedup). One row per capture holds a JSON map `{ [tankId]: { battles, wins,
+/// damage_dealt, spotted, frags, dropped_capture_points } }` (the `all` group),
+/// so row volume is one-per-capture, not one-per-tank. Trailing-window WN8 is
+/// computed as per-tank `current - nearestPast` deltas, then battle-weighted.
+/// When the whole blob is identical to the previous snapshot the row is skipped
+/// (the player hasn't played any vehicle).
+model PlayerVehicleSnapshot {
+  id         Int      @id @default(autoincrement())
+  accountId  Int
+  realm      String
+  capturedAt DateTime @default(now())
+  data       String // JSON map of { [tankId]: WN8 input counters }
+
+  @@unique([accountId, realm, capturedAt])
+  @@index([accountId, realm, capturedAt])
+}
