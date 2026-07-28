@@ -332,7 +332,9 @@ const resolveInputs = async (
   expectedById: Map<number, VehicleExpectedValue>
   vehicleById: Map<number, Vehicle>
 }> => {
-  const tankIds = Object.keys(perTank).map((id) => Number.parseInt(id, 10))
+  const tankIds = Object.keys(perTank)
+    .map((id) => Number.parseInt(id, 10))
+    .filter((n) => Number.isFinite(n))
   const [expectedById, vehicleById] = await Promise.all([
     getExpectedValuesByIds(tankIds),
     getVehiclesByIds(tankIds),
