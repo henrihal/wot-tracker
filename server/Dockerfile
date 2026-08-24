@@ -1,10 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- build stage ----
-# Compile TS -> dist/ with tsc. The Prisma client is generated with
-# importFileExtension = "js" (see prisma/schema.prisma), so its internal imports
-# are `.js`-suffixed; tsc emits them unchanged and plain `node` resolves them to
-# the compiled output. No tsx/loader hook is needed at runtime.
+# Compile TS -> dist/ with tsc.
 FROM node:22-alpine AS build
 WORKDIR /app
 
@@ -28,7 +25,6 @@ ENV NODE_ENV=production
 ENV PORT=5001
 
 # Production dependencies only, plus the Prisma CLI for `migrate deploy` at start.
-# tsx is NOT needed: the app runs as compiled JS via plain `node`.
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm install --no-save prisma
 
