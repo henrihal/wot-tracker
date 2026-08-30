@@ -39,8 +39,7 @@ if (!Number.isFinite(CACHE_TTL_SECONDS) || CACHE_TTL_SECONDS <= 0) {
   throw new Error('WARGAMING_CACHE_TTL_SECONDS must be a positive number')
 }
 
-// TTL for the account/info read cache. Separate from the search cache TTL since
-// player profiles change slowly and can reasonably live longer.
+// TTL for the account/info cache (separate; profiles change slowly).
 const INFO_CACHE_TTL_SECONDS = Number.parseInt(
   process.env['WARGAMING_INFO_CACHE_TTL_SECONDS'] ?? '3600',
   10
@@ -49,8 +48,7 @@ if (!Number.isFinite(INFO_CACHE_TTL_SECONDS) || INFO_CACHE_TTL_SECONDS <= 0) {
   throw new Error('WARGAMING_INFO_CACHE_TTL_SECONDS must be a positive number')
 }
 
-// TTL for the tanks/stats read cache. Per-tank stats are needed for WN8 and
-// change per battle; the same TTL as account/info is reasonable.
+// TTL for the tanks/stats cache.
 const VEHICLES_CACHE_TTL_SECONDS = Number.parseInt(
   process.env['WARGAMING_VEHICLES_CACHE_TTL_SECONDS'] ?? '3600',
   10
@@ -69,9 +67,8 @@ const INFO_API_URL = `https://${API_HOSTS[REALM]}/wot/account/info/`
 const VEHICLES_API_URL = `https://${API_HOSTS[REALM]}/wot/tanks/stats/`
 const ENCYCLOPEDIA_API_URL = `https://${API_HOSTS[REALM]}/wot/encyclopedia/vehicles/`
 
-// Public `statistics.*` extras fetchable with just application_id. The
-// `private.*` extras require an access_token (auth flow not implemented) and
-// are intentionally omitted.
+// Public statistics.* extras fetchable with just application_id. The private.*
+// extras need an access_token (auth flow not implemented) and are omitted.
 const PUBLIC_EXTRA_FIELDS = [
   'statistics.epic',
   'statistics.fallout',
@@ -112,10 +109,8 @@ export interface SearchPlayersOptions {
 }
 
 /**
- * Search Wargaming players by nickname via the account/list endpoint, acting as
- * a caching middleman. Successful responses are cached in SQLite keyed by the
- * normalized search term and realm; error responses are never cached so the
- * client can retry once the underlying problem (e.g. too-short search) is fixed.
+ * Caching middleman over WG account/list. Caches ok responses keyed by [search,
+ * realm]; errors are never cached so the client can retry once fixed.
  */
 export const searchPlayers = async (
   search: string,
@@ -197,28 +192,14 @@ export interface GetPlayerInfoOptions {
 }
 
 /**
- * Fetch a Wargaming player profile by account_id via the account/info endpoint,
- * acting as a caching middleman. The full public profile (default fields plus
- * all public statistics.* extras) is fetched on a cache miss or expiry and
- * stored in SQLite keyed by [account_id, realm] until `expiresAt`; subsequent
- * calls within the TTL are served from cache. forceRefresh re-fetches and
- * overwrites the cached row (bumping `expiresAt`). private.* extras are not
- * fetched (they require an access_token we don't have).
+ * Caching middleman over WG account/info. Fetches the full public profile +
+ * statistics.* extras, TTL-cached keyed by [accountId, realm]; forceRefresh
+ * overwrites. Also enrolls the account for capture when WG has it (see below).
  */
 export const getPlayerInfo = async (
   accountId: number,
   opts: GetPlayerInfoOptions = {}
 ): Promise<WargamingInfoResponse> => {
-  if (!Number.isInteger(accountId) || accountId <= 0) {
-    return apiError({
-      code: 402,
-      message:
-        'ACCOUNT_ID_NOT_SPECIFIED: account_id must be a positive integer.',
-      field: 'account_id',
-      value: accountId,
-    })
-  }
-
   if (!opts.forceRefresh) {
     const cached = await prisma.playerInfoCache.findUnique({
       where: { accountId_realm: { accountId, realm: REALM } },
@@ -261,13 +242,9 @@ export const getPlayerInfo = async (
       update: { response, fetchedAt: new Date(), expiresAt },
     })
 
-    // Enroll in the daily-capture work list only when WG actually has the
-    // account. WG returns status:"ok" with data[accountId] === null for a
-    // non-existent account_id; skip those so TrackedAccount stays clean. This
-    // is the single enrollment point for /players/info and the stats endpoints
-    // (the latter reach here via stats.ts getCurrentStats on a snapshot miss).
-    // Not done on the cache-hit path above: a cache row can only exist because
-    // a prior fresh fetch already enrolled the account.
+    // Enroll only when WG actually has the account: it returns status:"ok" with
+    // data[accountId] === null for an unknown id. Not done on a cache hit (a
+    // cached row implies a prior fresh fetch already enrolled it).
     if (body.data?.[String(accountId)] != null) {
       await prisma.trackedAccount.upsert({
         where: { accountId_realm: { accountId, realm: REALM } },
@@ -304,33 +281,15 @@ export interface GetPlayerVehiclesOptions {
 }
 
 /**
- * Fetch a player's per-vehicle statistics via the tanks/stats endpoint, acting
- * as a caching middleman. The full public per-tank stats (default `all` group
- * plus the `random` extra) are fetched on a cache miss or expiry and stored in
- * SQLite keyed by [account_id, realm] until `expiresAt`; subsequent calls
- * within the TTL are served from cache. forceRefresh re-fetches and overwrites
- * the cached row (bumping `expiresAt`). The `in_garage` field is not fetched
- * (it requires an access_token). On a successful fresh fetch it also upserts
- * the account into `TrackedAccount` — but only when WG returns a non-empty
- * tanks/stats array (the player has played at least one tank → the account
- * exists); this is the second enrollment point (the first is `getPlayerInfo`),
- * so `/players/:id/vehicles` and `/wn8` build history without a prior
- * `/players/info`. The cache-hit path does not re-upsert.
+ * Caching middleman over WG tanks/stats (default `all` group + `random` extra),
+ * TTL-cached keyed by [accountId, realm]; forceRefresh overwrites. Also
+ * enrolls the account for capture, but only on a non-empty tanks/stats array
+ * (see below).
  */
 export const getPlayerVehicles = async (
   accountId: number,
   opts: GetPlayerVehiclesOptions = {}
 ): Promise<WargamingVehicleStatsResponse> => {
-  if (!Number.isInteger(accountId) || accountId <= 0) {
-    return apiError({
-      code: 402,
-      message:
-        'ACCOUNT_ID_NOT_SPECIFIED: account_id must be a positive integer.',
-      field: 'account_id',
-      value: accountId,
-    })
-  }
-
   if (!opts.forceRefresh) {
     const cached = await prisma.playerVehicleStatsCache.findUnique({
       where: { accountId_realm: { accountId, realm: REALM } },
@@ -373,10 +332,8 @@ export const getPlayerVehicles = async (
       update: { response, fetchedAt: new Date(), expiresAt },
     })
 
-    // Enroll in the capture work list only when the player has actually played
-    // at least one tank (a non-empty tanks/stats array). WG returns an empty
-    // array both for a brand-new account and for an unknown account_id; an
-    // empty array is not a reliable existence signal, so it is not enrolled.
+    // Enroll only on a non-empty array: an empty one is ambiguous (unknown id
+    // vs. brand-new account), so it's not a reliable existence signal.
     const tanks = body.data?.[String(accountId)]
     if (Array.isArray(tanks) && tanks.length > 0) {
       await prisma.trackedAccount.upsert({
@@ -431,17 +388,10 @@ const ENCYCLOPEDIA_FIELDS = [
 ].join(',')
 
 /**
- * Fetch the full vehicle encyclopedia from `wot/encyclopedia/vehicles/`,
- * paginating `page_no` (limit 100). The page count is taken from the first
- * page's `meta.page_total` (WG also returns `meta.page` for the current page
- * and `meta.total` for the total tank count), so the loop requests exactly
- * the pages that exist — never `page_no` past the last page, which is what
- * triggers WG's `PAGE_NO_NOT_FOUND` error. Merges every page's `data` map
- * into a single `{ [tank_id]: vehicle }` map (the caller upserts rows into
- * the `Vehicle` table). The encyclopedia changes rarely (new tanks), so it is
- * not TTL-cached as a blob — normalized storage in `Vehicle` is the cache.
- * `forceRefresh` is accepted for API symmetry but has no effect here (every
- * call re-fetches all pages).
+ * Fetch the full WG vehicle encyclopedia, paginating page_no (limit 100) using
+ * the first response's meta.page_total so we never request past the last page
+ * (which triggers WG's PAGE_NO_NOT_FOUND). Merges every page's data into one
+ * { [tank_id]: vehicle } map. Not TTL-cached — the `Vehicle` table is the cache.
  */
 export const getVehicleEncyclopedia = async (
   _opts: GetVehicleEncyclopediaOptions = {}
@@ -454,8 +404,6 @@ export const getVehicleEncyclopedia = async (
   const vehicles: Record<string, EncyclopediaVehicle> = {}
   let page = 1
   let pages = 0
-  // Learned from the first response's `meta.page_total`; until then unbounded
-  // (a single-page encyclopedia still works via the page_total==1 stop).
   let pageTotal = Number.POSITIVE_INFINITY
 
   while (page <= pageTotal) {
@@ -509,7 +457,7 @@ export const getVehicleEncyclopedia = async (
 
     const data = body.data ?? {}
     for (const [id, vehicle] of Object.entries(data)) {
-      if (vehicle) vehicles[id] = vehicle
+      vehicles[id] = vehicle
     }
 
     page += 1

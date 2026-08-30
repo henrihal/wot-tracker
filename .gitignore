@@ -13,3 +13,7 @@ pnpm-debug.log*
 
 .vscode/*
 .DS_Store
+.claude/
+
+rest/
+scripts/

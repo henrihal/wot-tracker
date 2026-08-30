@@ -28,8 +28,7 @@ const parseAccountIdParam = (raw: string | undefined): number | null => {
   return accountId
 }
 
-// Shared error response for an invalid :accountId path parameter. Used by both
-// stats routes so the envelope stays identical.
+// Shared 400 envelope for an invalid :accountId (kept identical across routes).
 const sendAccountIdError = (res: express.Response, value: string): void => {
   sendApiError(res, 400, {
     code: 402,
@@ -40,25 +39,19 @@ const sendAccountIdError = (res: express.Response, value: string): void => {
   })
 }
 
-// Shared validation messages for the trailing-window ?range / ?ranges params.
-// Both stats and wn8 routes use the same wording, so it lives once here.
+// Shared ?range / ?ranges validation messages (stats + wn8 share wording).
 const RANGE_SINGLE_MSG = '?range query parameter must be one of: 7, 14, 30.'
 const RANGE_SET_MSG =
   '?ranges query parameter must be a comma-separated subset of: 7, 14, 30.'
 
-// Parse the single ?range query param into a valid trailing window (7/14/30)
-// or null. Shared by the stats and wn8 delta routes. Accepts the raw query
-// value (which Express types as string | ParsedQs | array) and narrows to a
-// string inside.
+// Parse ?range into a valid window (7/14/30) or null.
 const parseRange = (raw: unknown): number | null => {
   const n = typeof raw === 'string' ? Number.parseInt(raw, 10) : NaN
   return isValidRange(n) ? n : null
 }
 
-// Parse the ?ranges query param into a deduped, order-preserving subset of
-// 7/14/30 (default: all three). Returns null when every entry is invalid so the
-// caller can emit the validation error. Shared by the stats and wn8 summary
-// routes. Accepts the raw query value and narrows to a string inside.
+// Parse ?ranges into a deduped, order-preserving subset of 7/14/30 (default
+// all). null when every entry is invalid.
 const parseRanges = (raw: unknown): number[] | null => {
   const requested =
     typeof raw === 'string' && raw.length > 0
@@ -144,8 +137,6 @@ app.get('/players/:accountId/stats/summary', async (req, res) => {
     return
   }
 
-  // ?ranges=7,14,30 (default: all three). Each value must be a valid range;
-  // duplicates are collapsed while preserving first-seen order.
   const rangesRaw = req.query['ranges']
   const ranges = parseRanges(rangesRaw)
   if (ranges === null) {
@@ -183,7 +174,7 @@ app.get('/players/:accountId/wn8', async (req, res) => {
 
   const rangeRaw = req.query['range']
   if (rangeRaw === undefined) {
-    // No range → overall current WN8 from cumulative counters (no history needed).
+    // No range → overall current WN8 (no history needed).
     const result = await getWN8Current(accountId)
     sendResult(res, result)
     return
@@ -211,8 +202,6 @@ app.get('/players/:accountId/wn8/summary', async (req, res) => {
     return
   }
 
-  // ?ranges=7,14,30 (default: all three). Each value must be a valid range;
-  // duplicates are collapsed while preserving first-seen order.
   const rangesRaw = req.query['ranges']
   const ranges = parseRanges(rangesRaw)
   if (ranges === null) {
@@ -229,24 +218,16 @@ app.get('/players/:accountId/wn8/summary', async (req, res) => {
   sendResult(res, result)
 })
 
-// Admin endpoints are gated behind an X-Admin-Token header checked against
-// ADMIN_TOKEN. Fail-closed: if ADMIN_TOKEN is unset, every admin route returns
-// 503. See lib/adminAuth.ts.
+// Admin routes gated by X-Admin-Token; fail-closed (503 if ADMIN_TOKEN unset).
 app.use('/admin', adminAuth)
 
+// runCaptureJob throws on hard DB failure → apiErrorHandler as a 500 envelope.
 app.post('/admin/snapshots/run', async (_req, res) => {
-  // runCaptureJob throws on hard failure (Prisma/DB) — those propagate to
-  // apiErrorHandler as a 500 JSON envelope. The ok summary has no `status`
-  // field, so the envelope is built here.
   const summary = await runCaptureJob()
   sendResult(res, { status: 'ok', ...summary })
 })
 
 app.post('/admin/vehicles/refresh', async (_req, res) => {
-  // refreshVehicleEncyclopedia returns a TaggedApiResult: { status:'ok', tanks,
-  // pages } or { status:'error', error:{code,message} }. sendResult forwards the
-  // ok branch and promotes the error code (502) to the HTTP status. Throws
-  // (unexpected Prisma errors) fall through to apiErrorHandler.
   const result = await refreshVehicleEncyclopedia()
   sendResult(res, result)
 })
@@ -256,17 +237,12 @@ app.post('/admin/wn8/refresh-expected', async (_req, res) => {
   sendResult(res, result)
 })
 
-// Unmatched routes fall through to this JSON 404 envelope instead of Express's
-// default HTML 404, keeping the response shape uniform for clients. Registered
-// before the error handler (which is matched by arity + position) so a normal
-// 2-arg middleware handles the not-found case.
+// JSON 404 envelope for unmatched routes (registered before the error handler).
 app.use((_req, res) =>
   sendApiError(res, 404, { code: 404, message: 'Not found' })
 )
 
-// Express 5 routes async rejections and sync throws here. Registered after all
-// routes so thrown errors (Prisma, JSON.parse of a corrupt cache row) become
-// the API's JSON envelope instead of Express's default HTML 500.
+// Express 5 forwards async rejections / sync throws here → JSON envelope.
 app.use(apiErrorHandler)
 
 app.listen(PORT, () => {

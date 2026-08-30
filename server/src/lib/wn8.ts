@@ -9,9 +9,8 @@ import type {
 } from '../../generated/prisma/client.js'
 import { CAPTURE_DEDUP_MS } from './stats.js'
 
-// WN8 input counters snapshotted from each tank's `statistics.random.*` group.
-// Lean on purpose: only what the WN8 formula consumes (the `random` group is what
-// WN8 is defined against). `dropped_capture_points` is the defense stat.
+// WN8 input counters from each tank's statistics.random.* — only what the
+// formula consumes (WN8 is defined against the random group).
 const VEHICLE_FIELDS = [
   'battles',
   'wins',
@@ -23,8 +22,7 @@ const VEHICLE_FIELDS = [
 
 export type VehicleCounters = Record<(typeof VEHICLE_FIELDS)[number], number>
 
-/// Per-account snapshot of all tanks' WN8 counters as a JSON map
-/// `{ [tankId]: VehicleCounters }`.
+/// Per-account snapshot of all tanks' counters as `{ [tankId]: VehicleCounters }`.
 export type VehicleStats = Record<string, VehicleCounters>
 
 const DAY_MS = 86_400_000
@@ -51,12 +49,7 @@ const pickCounters = (obj: unknown): VehicleCounters => {
   return out
 }
 
-/**
- * Extract the WN8 input counters for every tank of `accountId` from a
- * Wargaming tanks/stats response, as a `{ [tankId]: VehicleCounters }` map
- * (the `random` group). Returns `null` if the account isn't present in the
- * response payload (e.g. unknown account_id, or WG returned `null`).
- */
+/** Extract per-tank WN8 counters from tanks/stats. null if the account isn't present. */
 export const extractVehicleStats = (
   resp: WargamingVehicleStatsResponse,
   accountId: number
@@ -74,14 +67,10 @@ export const extractVehicleStats = (
 }
 
 /**
- * Write a per-vehicle snapshot row for the account unless one was captured
- * within the last `CAPTURE_DEDUP_MS` (5 min). When `skipIfInactive` is true
- * (the default), also no-ops if the freshly extracted counter map is byte-identical
- * to the most recent snapshot (the player hasn't played any vehicle since) —
- * tanks/stats has no per-tank `last_battle_time`, so the whole blob is compared.
- * The read path passes `skipIfInactive: false` so a recent row always lands.
- * No-ops if the account has no tanks in the response. A P2002 (same-second
- * concurrent capture) is ignored. Returns true when a new row was written.
+ * Write a per-vehicle snapshot unless one was captured within CAPTURE_DEDUP_MS.
+ * With skipIfInactive (default) also no-op if the blob is byte-identical to the
+ * last snapshot (no per-tank last_battle_time exists to compare). P2002 ignored.
+ * Returns true if a row was written.
  */
 export const captureVehicleSnapshotIfStale = async (
   accountId: number,
@@ -137,11 +126,8 @@ export const captureVehicleSnapshotIfStale = async (
 }
 
 /**
- * Resolve the "current" per-tank counter map for an account. A snapshot
- * captured within the last `CAPTURE_DEDUP_MS` (5 min) is reused so repeated
- * WN8 queries don't hit Wargaming; otherwise tanks/stats is force-refreshed, a
- * fresh snapshot is recorded (skipped if the player hasn't played since the
- * last one), and the freshly fetched counters are used directly.
+ * Resolve the current per-tank counters: reuse a snapshot within
+ * CAPTURE_DEDUP_MS, else force-refresh + capture + use the fetched counters.
  */
 const getCurrentVehicleStats = async (
   accountId: number
@@ -183,10 +169,8 @@ const getCurrentVehicleStats = async (
 }
 
 /**
- * Per-tank field deltas (current minus past), negatives clamped to 0. Tanks
- * present in `current` but missing from `past` (first-seen) are taken at their
- * full current counters as the delta; tanks with `battles <= 0` after diffing
- * are dropped (no play in the window → no WN8 contribution).
+ * Per-tank current − past, negatives clamped to 0. First-seen tanks use their
+ * full current counters; tanks with battles <= 0 after diffing are dropped.
  */
 export const computeVehicleDelta = (
   past: VehicleStats,
@@ -217,10 +201,8 @@ export const computeVehicleDelta = (
 const safeDiv = (n: number, d: number): number => (d > 0 ? n / d : 0)
 
 /**
- * The shared WN8 formula tail: apply the canonical clamp/cap then the weighted
- * sum to the five normalized ratios (rDAMAGE, rSPOT, rFRAG, rDEF, rWIN). Both the
- * per-tank path and the account-wide aggregate path funnel through here so the
- * nonlinear step cannot drift between them. Returns the unrounded WN8.
+ * WN8 formula tail: clamp/cap then weighted sum. Shared by the per-tank and
+ * aggregate paths so the nonlinear step can't drift between them. Unrounded.
  */
 const wn8FromRatios = (
   rDAMAGE: number,
@@ -244,11 +226,7 @@ const wn8FromRatios = (
   )
 }
 
-/**
- * Compute a single tank's WN8 from its counters and expected values, using the
- * canonical WN8 formula (ratios → clamp/cap → weighted sum). Returns 0 when
- * the tank has no battles or when expected values are missing.
- */
+/** Single-tank WN8 via the canonical formula. 0 when no battles or no expected values. */
 export const computeTankWN8 = (
   counters: VehicleCounters,
   exp: VehicleExpectedValue | undefined
@@ -274,25 +252,18 @@ export interface TankWN8 extends VehicleCounters {
 }
 
 /**
- * Account-wide WN8 from a per-tank counter map. WN8 is defined as a single
- * formula applied once to account-wide aggregates — NOT a battle-weighted mean
- * of per-tank WN8 scores (the clamp/cap nonlinearity does not compose). So we
- * sum all raw counters and all battle-weighted expected values across tanks,
- * then apply the formula once to those aggregates via `wn8FromRatios`.
- *
- * Tanks missing from `expectedById` (or with no expected values) are excluded
- * entirely — they contribute to neither the numerator nor the battle-weighted
- * expected denominator. `vehicleById` enriches the breakdown. Returns the
- * aggregate WN8, total battles counted, and a per-tank breakdown (each entry's
- * `wn8` is that tank's own WN8 via `computeTankWN8`, for display only).
+ * Account-wide WN8 = the formula applied once to account-wide aggregates, NOT a
+ * battle-weighted mean of per-tank scores (the clamp/cap nonlinearity doesn't
+ * compose). Tanks missing expected values are excluded entirely. Returns the
+ * aggregate wn8, total battles, and a display-only per-tank breakdown.
  */
 export const computeAccountWN8 = (
   perTank: VehicleStats,
   expectedById: Map<number, VehicleExpectedValue>,
   vehicleById: Map<number, Vehicle>
 ): { wn8: number; battles: number; perTank: TankWN8[] } => {
-  // Account-wide aggregates: raw counters and battle-weighted expected values
-  // accumulated across tanks, so the WN8 formula can be applied once to them.
+  // Aggregate raw counters and battle-weighted expected values across tanks so
+  // the formula can be applied once to them.
   const total = {
     damage: 0,
     spot: 0,
@@ -310,7 +281,6 @@ export const computeAccountWN8 = (
 
   for (const [id, counters] of Object.entries(perTank)) {
     const tankId = Number.parseInt(id, 10)
-    if (!Number.isFinite(tankId)) continue
     const exp = expectedById.get(tankId)
     if (!exp) continue
     const b = counters.battles
@@ -381,11 +351,7 @@ export type Wn8CurrentResult =
     }
   | { status: 'error'; error: { code: number; message: string } }
 
-/**
- * Compute the player's overall current WN8 from the cumulative per-tank
- * counters (no past anchor, no history required). Always available once the
- * account has played tanks with known expected values.
- */
+/** Overall current WN8 from cumulative counters (no past anchor, no history needed). */
 export const getWN8Current = async (
   accountId: number
 ): Promise<Wn8CurrentResult> => {
@@ -409,10 +375,9 @@ export type Wn8DeltaResult =
   | { status: 'error'; error: { code: number; message: string } }
 
 /**
- * Find a past per-vehicle snapshot to diff against (nearest at `>= days` ago,
- * else the oldest available past one), compute per-tank deltas, and aggregate
- * WN8 over the window. Returns `INSUFFICIENT_HISTORY` (422) only when no past
- * snapshot exists at all. Mirrors `computeRangeResult` in stats.ts.
+ * Diff against a past per-vehicle snapshot (nearest at >= days, else oldest),
+ * compute per-tank deltas, and aggregate WN8 over the window.
+ * INSUFFICIENT_HISTORY only when no past snapshot exists. Mirrors stats.ts.
  */
 const computeRangeResult = async (
   accountId: number,
@@ -459,13 +424,9 @@ const computeRangeResult = async (
 }
 
 /**
- * Compute trailing-window WN8 over `days` days. "Current" per-tank counters
- * come from a snapshot captured within the last `CAPTURE_DEDUP_MS` if one
- * exists; otherwise tanks/stats is force-refreshed and a fresh snapshot is
- * recorded. The nearest snapshot at `>= days` ago is the past anchor; if none
- * is that old, the oldest available past snapshot is used (best-available),
- * with `from` showing the anchor actually used. Returns `INSUFFICIENT_HISTORY`
- * (422) only when no past snapshot exists at all.
+ * Trailing-window WN8 over `days` days. Current via getCurrentVehicleStats;
+ * past via computeRangeResult. INSUFFICIENT_HISTORY only when no past snapshot
+ * exists; `from` shows the anchor actually used.
  */
 export const getWN8Delta = async (
   accountId: number,
@@ -485,11 +446,9 @@ export type Wn8SummaryResult =
   Wn8SummaryOk | { status: 'error'; error: { code: number; message: string } }
 
 /**
- * Compute trailing-window WN8 for multiple windows in one call. "Current" is
- * fetched once and reused across all ranges; each range resolves its own past
- * anchor independently. An `INSUFFICIENT_HISTORY` entry appears in `ranges`
- * only when no past snapshot exists at all for that range; the whole request
- * never fails on a single range.
+ * WN8 for multiple windows in one call: current fetched once, each range
+ * resolves its own anchor. A range with no history yields an
+ * INSUFFICIENT_HISTORY entry, never a whole-request failure.
  */
 export const getWN8Summary = async (
   accountId: number,

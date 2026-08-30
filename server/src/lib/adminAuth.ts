@@ -2,15 +2,11 @@ import { timingSafeEqual } from 'node:crypto'
 import type { RequestHandler } from 'express'
 import { sendApiError } from './http.js'
 
-// Shared secret for /admin/* endpoints. Read once at module load; an unset/empty
-// value disables admin entirely (fail-closed) so an unconfigured server never
-// exposes capture/refresh ops.
+// Shared secret for /admin/*; unset/empty disables admin entirely (fail-closed).
 const ADMIN_TOKEN = process.env['ADMIN_TOKEN'] ?? ''
 
-// Constant-time string compare to avoid leaking the secret length/contents via
-// a timing side channel. timingSafeEqual throws on mismatched Buffer lengths,
-// so guard that case with a cheap length check first (the lengths themselves
-// are not secret).
+// Constant-time compare; length-check first since timingSafeEqual throws on
+// length mismatch (lengths themselves aren't secret).
 const safeEqual = (a: string, b: string): boolean => {
   const aBuf = Buffer.from(a)
   const bBuf = Buffer.from(b)
@@ -18,10 +14,7 @@ const safeEqual = (a: string, b: string): boolean => {
   return timingSafeEqual(aBuf, bBuf)
 }
 
-// Guards every /admin/* route behind an X-Admin-Token header checked against
-// ADMIN_TOKEN. Fail-closed: if ADMIN_TOKEN is not configured, every admin route
-// returns 503 (admin disabled) regardless of the header. A missing or
-// mismatched header returns 401. On success, falls through to the route.
+// Guard /admin/* via X-Admin-Token: 503 if unset, 401 if missing/mismatched.
 export const adminAuth: RequestHandler = (req, res, next) => {
   if (!ADMIN_TOKEN) {
     sendApiError(res, 503, {
