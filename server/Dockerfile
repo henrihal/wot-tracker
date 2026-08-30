@@ -26,7 +26,7 @@ ENV PORT=5001
 
 # Production dependencies only, plus the Prisma CLI for `migrate deploy` at start.
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm install --no-save prisma
+RUN npm ci --omit=dev && npm install --no-save prisma@7.8.0
 
 # Compiled app + generated client, and the schema/migrations + config for migrate.
 COPY --from=build /app/dist ./dist
